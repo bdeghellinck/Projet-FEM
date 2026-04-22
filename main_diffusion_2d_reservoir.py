@@ -1,6 +1,10 @@
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
+
+from scipy.special import j0, j1
+from scipy.optimize import brentq
 
 from gmsh_utils import (
     gmsh_finalize,
@@ -9,7 +13,13 @@ from gmsh_utils import (
     get_jacobians,
     border_dofs_from_tags,
 )
-from plot_utils import plot_mesh_2d
+from stiffness import assemble_stiffness_and_rhs
+from Neumann import assemble_rhs_neumann_outlet
+from Robin import assemble_robin_wall
+from mass import assemble_mass
+from dirichlet import theta_step
+from Advection import assemble_advection
+from plot_utils import setup_interactive_figure, plot_mesh_2d, plot_fe_solution_2d,plot_advection_field_uniform
 
 
 def main():
@@ -26,10 +36,9 @@ def main():
     args = parser.parse_args()
 
     # ------------------------------------------------------------
-    # 1) Maillage
+    # 1) Maillage 
     # ------------------------------------------------------------
-    elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags = \
-        build_two_reservoir_mesh(
+    elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags = build_two_reservoir_mesh(
             H=args.H,
             h_pipe=args.h_pipe,
             L_res=args.L_res,
@@ -39,15 +48,16 @@ def main():
             order=args.order,
         )
 
+    """ Vérifications 
     print(f"\nMaillage genere :")
     print(f"  Noeuds   : {len(nodeTags)}")
     print(f"  Elements : {len(elemTags)}")
     print(f"\nBords :")
     for (name, _), tags in zip(bnds, bnds_tags):
         print(f"  {name:25s} : {len(tags):4d} noeuds")
-
+    """
     # ------------------------------------------------------------
-    # 2) Mapping tag -> dof  (bloc standard, identique au main original)
+    # 2) Mapping tag -> dof  (meme que main de base)
     # ------------------------------------------------------------
     unique_dofs_tags = np.unique(elemNodeTags)
     max_tag = int(np.max(nodeTags))
