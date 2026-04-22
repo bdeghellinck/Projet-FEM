@@ -288,9 +288,9 @@ def _extract_boundaries(boundary_names):
     return bnds, bnds_tags
 
 
-def build_two_reservoir_mesh(
-    H=0.04,
-    h_pipe=0.01,
+def build_axi_reservoir_mesh(
+    R_res=0.04,
+    R_pipe=0.01,
     L_res=0.08,
     L_pipe=0.16,
     lc_res=0.004,
@@ -298,77 +298,121 @@ def build_two_reservoir_mesh(
     order=1,
 ):
     """
-    Build a 2D mesh for a two-reservoir system connected by a thin pipe.
-
-    Upper half only (y >= 0). Symmetry along y=0 is a natural Neumann
-    condition and needs no assembly.
-
-    Geometry (8 corners, counter-clockwise):
-
-        p8──────────p7          p4──────────p3
-        │  Reservoir │          │  Reservoir │
-        │   (cold)   │          │   (hot)    │
-        │            p6────────p5            │
-        p1────────────────────────────────── p2
-                        y = 0  (symmetry)
-
-    Boundary names returned (in order):
-        "Entree"            x=0,           y in [0,H]   Neumann inflow
-        "Sortie"            x=L_tot,       y in [0,H]   Neumann outflow
-        "Wall_pipe"         y=h_pipe,  x in [L_res, L_res+L_pipe]  Robin
-        "Sym"               y=0                          natural (no assembly)
-        "Wall_res_left"     y=H,   x in [0, L_res]       adiabatic (natural)
-        "Wall_res_right"    y=H,   x in [L_res+L_pipe, L_tot]  adiabatic (natural)
-        "Contraction_left"  x=L_res,   y in [h_pipe, H]  adiabatic (natural)
-        "Contraction_right" x=L_res+L_pipe, y in [h_pipe,H]  adiabatic (natural)
-
+    Build a 2D axisymmetric mesh for two cylindrical chambers connected
+    by a narrow tube, in meridional coordinates (r, z).
+ 
+    The domain is the meridional half-plane r >= 0. The axis r=0 is a
+    natural Neumann condition (symmetry of revolution) — no assembly needed.
+ 
+    Geometry (8 corners, same H-shape as build_two_reservoir_mesh but
+    now interpreted as (r=y, z=x) in axisymmetric coordinates):
+ 
+        r=R_res  p8──────p7          p4──────p3
+                 │ CHAMB  │          │ CHAMB  │
+        r=R_pipe │ GAUCHE p6────────p5 DROITE │
+                 │                            │
+        r=0      p1──────────────────────────p2
+                 z=0    z=L1  z=L1+L2   z=L1+L2+L3
+ 
+    Convention: x[0] = r (radial), x[1] = z (axial)
+    This matches the existing assemblers (stiffness, mass, Robin, Neumann)
+    which already include the axisymmetric factor r = x[0].
+ 
+    Boundary conditions:
+        "Entree"            z=0,          r in [0, R_res]  : Neumann inflow q_in
+        "Sortie"            z=L_tot,      r in [0, R_res]  : Neumann outflow (homogeneous)
+        "Wall_pipe"         r=R_pipe, z in [L_res, L_res+L_pipe] : Robin (heating)
+        "Axis"              r=0                             : symmetry (natural)
+        "Wall_res_left"     r=R_res,  z in [0, L_res]      : adiabatic (natural)
+        "Wall_res_right"    r=R_res,  z in [L_res+L_pipe, L_tot] : adiabatic (natural)
+        "Contraction_left"  z=L_res,  r in [R_pipe, R_res] : adiabatic (natural)
+        "Contraction_right" z=L_res+L_pipe, r in [R_pipe, R_res] : adiabatic (natural)
+ 
+    All adiabatic walls and the axis are natural Neumann → no assembly needed.
+    Only "Entree", "Sortie", and "Wall_pipe" need explicit assembly.
+ 
+    Parameters
+    ----------
+    R_res   : float  Radius of the cylindrical chambers
+    R_pipe  : float  Radius of the connecting tube  (R_pipe < R_res)
+    L_res   : float  Axial length of each chamber
+    L_pipe  : float  Axial length of the tube
+    lc_res  : float  Characteristic mesh size in the chambers
+    lc_pipe : float  Characteristic mesh size in the tube
+    order   : int    FE polynomial order (1 or 2)
+ 
     Returns
     -------
     elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
     (same format as build_conduit_mesh)
+ 
+    Boundary names (in order):
+        "Entree", "Sortie", "Wall_pipe", "Axis",
+        "Wall_res_left", "Wall_res_right",
+        "Contraction_left", "Contraction_right"
     """
     import gmsh
     import numpy as np
-
+ 
     gmsh.initialize()
-    gmsh.model.add("two_reservoir")
-
+    gmsh.model.add("two_chamber_axi")
+ 
     L_tot = 2.0 * L_res + L_pipe
-
+ 
     # ------------------------------------------------------------------
-    # Points (x, y)  — counter-clockwise from bottom-left
+    # 8 corner points  (r, z) — counter-clockwise from bottom-left
+    #
+    #   "bottom" = axis r=0
+    #   "top"    = outer wall r=R_res
+    #   "left"   = inlet z=0
+    #   "right"  = outlet z=L_tot
+    #
+    #   p1 = (r=0,      z=0     )   axis,  inlet
+    #   p2 = (r=0,      z=L_tot )   axis,  outlet
+    #   p3 = (r=R_res,  z=L_tot )   wall,  outlet
+    #   p4 = (r=R_res,  z=L1+L2 )   wall,  right contraction top
+    #   p5 = (r=R_pipe, z=L1+L2 )   tube wall, right
+    #   p6 = (r=R_pipe, z=L1    )   tube wall, left
+    #   p7 = (r=R_res,  z=L1    )   wall,  left contraction top
+    #   p8 = (r=R_res,  z=0     )   wall,  inlet
     # ------------------------------------------------------------------
-    p1 = gmsh.model.geo.addPoint(0.0,            0.0,    0.0, lc_res)
-    p2 = gmsh.model.geo.addPoint(L_tot,          0.0,    0.0, lc_res)
-    p3 = gmsh.model.geo.addPoint(L_tot,          H,      0.0, lc_res)
-    p4 = gmsh.model.geo.addPoint(L_res + L_pipe, H,      0.0, lc_res)
-    p5 = gmsh.model.geo.addPoint(L_res + L_pipe, h_pipe, 0.0, lc_pipe)
-    p6 = gmsh.model.geo.addPoint(L_res,          h_pipe, 0.0, lc_pipe)
-    p7 = gmsh.model.geo.addPoint(L_res,          H,      0.0, lc_res)
-    p8 = gmsh.model.geo.addPoint(0.0,            H,      0.0, lc_res)
-
+    p1 = gmsh.model.geo.addPoint(0.0,    0.0,            0.0, lc_res)
+    p2 = gmsh.model.geo.addPoint(0.0,    L_tot,          0.0, lc_res) 
+    p3 = gmsh.model.geo.addPoint(R_res,  L_tot,          0.0, lc_res) 
+    p4 = gmsh.model.geo.addPoint(R_res,  L_res + L_pipe, 0.0, lc_res)   
+    p5 = gmsh.model.geo.addPoint(R_pipe, L_res + L_pipe, 0.0, lc_pipe)  
+    p6 = gmsh.model.geo.addPoint(R_pipe, L_res,          0.0, lc_pipe)  
+    p7 = gmsh.model.geo.addPoint(R_res,  L_res,          0.0, lc_res)   
+    p8 = gmsh.model.geo.addPoint(R_res,  0.0,            0.0, lc_res)   
+ 
     # ------------------------------------------------------------------
-    # Lines
+    # 8 boundary lines (counter-clockwise)
     # ------------------------------------------------------------------
-    l_sym               = gmsh.model.geo.addLine(p1, p2)
-    l_sortie            = gmsh.model.geo.addLine(p2, p3)
-    l_wall_res_right    = gmsh.model.geo.addLine(p3, p4)
-    l_contraction_right = gmsh.model.geo.addLine(p4, p5)
-    l_wall_pipe         = gmsh.model.geo.addLine(p5, p6)
-    l_contraction_left  = gmsh.model.geo.addLine(p6, p7)
-    l_wall_res_left     = gmsh.model.geo.addLine(p7, p8)
-    l_entree            = gmsh.model.geo.addLine(p8, p1)
-
+    l_axis              = gmsh.model.geo.addLine(p1, p2)   # r=0      (axis)
+    l_sortie            = gmsh.model.geo.addLine(p2, p3)   # z=L_tot  (outlet)
+    l_wall_res_right    = gmsh.model.geo.addLine(p3, p4)   # r=R_res, right chamber
+    l_contraction_right = gmsh.model.geo.addLine(p4, p5)   # z=L1+L2  (step wall)
+    l_wall_pipe         = gmsh.model.geo.addLine(p5, p6)   # r=R_pipe (Robin wall)
+    l_contraction_left  = gmsh.model.geo.addLine(p6, p7)   # z=L1     (step wall)
+    l_wall_res_left     = gmsh.model.geo.addLine(p7, p8)   # r=R_res, left chamber
+    l_entree            = gmsh.model.geo.addLine(p8, p1)   # z=0      (inlet)
+ 
     # ------------------------------------------------------------------
-    # Surface (single closed loop)
+    # Single closed surface
     # ------------------------------------------------------------------
     cloop = gmsh.model.geo.addCurveLoop([
-        l_sym, l_sortie, l_wall_res_right, l_contraction_right,
-        l_wall_pipe, l_contraction_left, l_wall_res_left, l_entree,
+        l_axis,
+        l_sortie,
+        l_wall_res_right,
+        l_contraction_right,
+        l_wall_pipe,
+        l_contraction_left,
+        l_wall_res_left,
+        l_entree,
     ])
     surf = gmsh.model.geo.addPlaneSurface([cloop])
     gmsh.model.geo.synchronize()
-
+ 
     # ------------------------------------------------------------------
     # Physical groups
     # ------------------------------------------------------------------
@@ -376,7 +420,7 @@ def build_two_reservoir_mesh(
         "Entree":            ([l_entree],            1),
         "Sortie":            ([l_sortie],            2),
         "Wall_pipe":         ([l_wall_pipe],         3),
-        "Sym":               ([l_sym],               4),
+        "Axis":              ([l_axis],              4),
         "Wall_res_left":     ([l_wall_res_left],     5),
         "Wall_res_right":    ([l_wall_res_right],    6),
         "Contraction_left":  ([l_contraction_left],  7),
@@ -385,28 +429,29 @@ def build_two_reservoir_mesh(
     for name, (lines, tag) in groups.items():
         gmsh.model.addPhysicalGroup(1, lines, tag=tag)
         gmsh.model.setPhysicalName(1, tag, name)
-
+ 
     gmsh.model.addPhysicalGroup(2, [surf], tag=10)
     gmsh.model.setPhysicalName(2, 10, "Fluid")
-
+ 
     # ------------------------------------------------------------------
     # Mesh
     # ------------------------------------------------------------------
     gmsh.model.mesh.generate(2)
     gmsh.model.mesh.setOrder(order)
-
+ 
     # ------------------------------------------------------------------
-    # Extract mesh arrays  (reuse existing helpers from gmsh_utils)
+    # Extract mesh arrays
     # ------------------------------------------------------------------
     elemType = gmsh.model.mesh.getElementType("triangle", order)
     nodeTags, nodeCoords, _ = gmsh.model.mesh.getNodes()
     elemTags, elemNodeTags  = gmsh.model.mesh.getElementsByType(elemType)
-
+ 
     boundary_names = [
-        "Entree", "Sortie", "Wall_pipe", "Sym",
+        "Entree", "Sortie", "Wall_pipe", "Axis",
         "Wall_res_left", "Wall_res_right",
         "Contraction_left", "Contraction_right",
     ]
     bnds, bnds_tags = _extract_boundaries(boundary_names)
-
+ 
     return elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
+ 
