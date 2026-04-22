@@ -151,25 +151,12 @@ def open_2d_mesh(msh_filename, order=1):
 
     return elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
 
+##################### changements oulala ###########################
 
 def build_conduit_mesh(R=1.0, L=5.0, lc=0.1, order=1):
     """
-    Build a 2D axisymmetric conduit mesh in (r,z).
-
-    Parameters
-    ----------
-    R : float
-        Radius (max r)
-    L : float
-        Length (max z)
-    lc : float
-        Mesh size
-    order : int
-        Polynomial order
-
-    Returns
-    -------
-    elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
+    Build a 2D axisymmetric conduit mesh in (r,z)
+    Returns: elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
     """
 
     import gmsh
@@ -203,9 +190,9 @@ def build_conduit_mesh(R=1.0, L=5.0, lc=0.1, order=1):
     # Synchronize geometry
     gmsh.model.geo.synchronize()
 
-    # -----------------------------
-    # Physical groups (CRUCIAL)
-    # -----------------------------
+    # ------------------
+    # Physical groups
+    # -----------------
     gmsh.model.addPhysicalGroup(1, [l1], tag=1)
     gmsh.model.setPhysicalName(1, 1, "Entree")
 
@@ -228,7 +215,7 @@ def build_conduit_mesh(R=1.0, L=5.0, lc=0.1, order=1):
     gmsh.model.mesh.setOrder(order)
 
     # -----------------------------
-    # Extract mesh (comme ton code)
+    # Extract mesh 
     # -----------------------------
     elemType = gmsh.model.mesh.getElementType("triangle", order)
     nodeTags, nodeCoords, _ = gmsh.model.mesh.getNodes()
@@ -257,5 +244,156 @@ def build_conduit_mesh(R=1.0, L=5.0, lc=0.1, order=1):
 
         bnds.append((name, 1))
         bnds_tags.append(tags)
+
+    return elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
+
+def _extract_boundaries(boundary_names):
+    """
+    Helper interne : extrait les tags de noeuds gmsh pour une liste de noms
+    de groupes physiques 1D. Retourne (bnds, bnds_tags) dans le meme format
+    que build_conduit_mesh.
+    """
+    import gmsh
+    import numpy as np
+
+    phys_groups = gmsh.model.getPhysicalGroups(1)
+    name_to_tag = {}
+    for dim, tag in phys_groups:
+        name = gmsh.model.getPhysicalName(dim, tag)
+        if name:
+            name_to_tag[name] = tag
+
+    bnds      = []
+    bnds_tags = []
+    for name in boundary_names:
+        tag = name_to_tag[name]
+        tags, _ = gmsh.model.mesh.getNodesForPhysicalGroup(1, tag)
+        tags = np.unique(np.asarray(tags, dtype=int))
+        bnds.append((name, 1))
+        bnds_tags.append(tags)
+
+    return bnds, bnds_tags
+
+
+def build_two_reservoir_mesh(
+    H=0.04,
+    h_pipe=0.01,
+    L_res=0.08,
+    L_pipe=0.16,
+    lc_res=0.004,
+    lc_pipe=0.001,
+    order=1,
+):
+    """
+    Build a 2D mesh for a two-reservoir system connected by a thin pipe.
+
+    Upper half only (y >= 0). Symmetry along y=0 is a natural Neumann
+    condition and needs no assembly.
+
+    Geometry (8 corners, counter-clockwise):
+
+        p8──────────p7          p4──────────p3
+        │  Reservoir │          │  Reservoir │
+        │   (cold)   │          │   (hot)    │
+        │            p6────────p5            │
+        p1────────────────────────────────── p2
+                        y = 0  (symmetry)
+
+    Boundary names returned (in order):
+        "Entree"            x=0,           y in [0,H]   Neumann inflow
+        "Sortie"            x=L_tot,       y in [0,H]   Neumann outflow
+        "Wall_pipe"         y=h_pipe,  x in [L_res, L_res+L_pipe]  Robin
+        "Sym"               y=0                          natural (no assembly)
+        "Wall_res_left"     y=H,   x in [0, L_res]       adiabatic (natural)
+        "Wall_res_right"    y=H,   x in [L_res+L_pipe, L_tot]  adiabatic (natural)
+        "Contraction_left"  x=L_res,   y in [h_pipe, H]  adiabatic (natural)
+        "Contraction_right" x=L_res+L_pipe, y in [h_pipe,H]  adiabatic (natural)
+
+    Returns
+    -------
+    elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
+    (same format as build_conduit_mesh)
+    """
+    import gmsh
+    import numpy as np
+
+    gmsh.initialize()
+    gmsh.model.add("two_reservoir")
+
+    L_tot = 2.0 * L_res + L_pipe
+
+    # ------------------------------------------------------------------
+    # Points (x, y)  — counter-clockwise from bottom-left
+    # ------------------------------------------------------------------
+    p1 = gmsh.model.geo.addPoint(0.0,            0.0,    0.0, lc_res)
+    p2 = gmsh.model.geo.addPoint(L_tot,          0.0,    0.0, lc_res)
+    p3 = gmsh.model.geo.addPoint(L_tot,          H,      0.0, lc_res)
+    p4 = gmsh.model.geo.addPoint(L_res + L_pipe, H,      0.0, lc_res)
+    p5 = gmsh.model.geo.addPoint(L_res + L_pipe, h_pipe, 0.0, lc_pipe)
+    p6 = gmsh.model.geo.addPoint(L_res,          h_pipe, 0.0, lc_pipe)
+    p7 = gmsh.model.geo.addPoint(L_res,          H,      0.0, lc_res)
+    p8 = gmsh.model.geo.addPoint(0.0,            H,      0.0, lc_res)
+
+    # ------------------------------------------------------------------
+    # Lines
+    # ------------------------------------------------------------------
+    l_sym               = gmsh.model.geo.addLine(p1, p2)
+    l_sortie            = gmsh.model.geo.addLine(p2, p3)
+    l_wall_res_right    = gmsh.model.geo.addLine(p3, p4)
+    l_contraction_right = gmsh.model.geo.addLine(p4, p5)
+    l_wall_pipe         = gmsh.model.geo.addLine(p5, p6)
+    l_contraction_left  = gmsh.model.geo.addLine(p6, p7)
+    l_wall_res_left     = gmsh.model.geo.addLine(p7, p8)
+    l_entree            = gmsh.model.geo.addLine(p8, p1)
+
+    # ------------------------------------------------------------------
+    # Surface (single closed loop)
+    # ------------------------------------------------------------------
+    cloop = gmsh.model.geo.addCurveLoop([
+        l_sym, l_sortie, l_wall_res_right, l_contraction_right,
+        l_wall_pipe, l_contraction_left, l_wall_res_left, l_entree,
+    ])
+    surf = gmsh.model.geo.addPlaneSurface([cloop])
+    gmsh.model.geo.synchronize()
+
+    # ------------------------------------------------------------------
+    # Physical groups
+    # ------------------------------------------------------------------
+    groups = {
+        "Entree":            ([l_entree],            1),
+        "Sortie":            ([l_sortie],            2),
+        "Wall_pipe":         ([l_wall_pipe],         3),
+        "Sym":               ([l_sym],               4),
+        "Wall_res_left":     ([l_wall_res_left],     5),
+        "Wall_res_right":    ([l_wall_res_right],    6),
+        "Contraction_left":  ([l_contraction_left],  7),
+        "Contraction_right": ([l_contraction_right], 8),
+    }
+    for name, (lines, tag) in groups.items():
+        gmsh.model.addPhysicalGroup(1, lines, tag=tag)
+        gmsh.model.setPhysicalName(1, tag, name)
+
+    gmsh.model.addPhysicalGroup(2, [surf], tag=10)
+    gmsh.model.setPhysicalName(2, 10, "Fluid")
+
+    # ------------------------------------------------------------------
+    # Mesh
+    # ------------------------------------------------------------------
+    gmsh.model.mesh.generate(2)
+    gmsh.model.mesh.setOrder(order)
+
+    # ------------------------------------------------------------------
+    # Extract mesh arrays 
+    # ------------------------------------------------------------------
+    elemType = gmsh.model.mesh.getElementType("triangle", order)
+    nodeTags, nodeCoords, _ = gmsh.model.mesh.getNodes()
+    elemTags, elemNodeTags  = gmsh.model.mesh.getElementsByType(elemType)
+
+    boundary_names = [
+        "Entree", "Sortie", "Wall_pipe", "Sym",
+        "Wall_res_left", "Wall_res_right",
+        "Contraction_left", "Contraction_right",
+    ]
+    bnds, bnds_tags = _extract_boundaries(boundary_names)
 
     return elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
