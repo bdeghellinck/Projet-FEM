@@ -9,18 +9,22 @@ from gmsh_utils import (
     prepare_quadrature_and_basis,
     get_jacobians,
     border_dofs_from_tags,
+    plot_full_reservoir,
 )
 from stiffness import assemble_stiffness_and_rhs
 from mass import assemble_mass
 from dirichlet import theta_step
 from plot_utils import plot_mesh_2d, plot_fe_solution_2d
+from Neumann import assemble_rhs_neumann_outlet
+from Robin import assemble_robin_wall
+from Advection import assemble_advection
 
 
 def main():
     parser = argparse.ArgumentParser(description="Diffusion thermique axisymetrique deux chambres")
  
     parser.add_argument("-order",    type=int,   default=1,      help="Ordre des elements finis")
-    parser.add_argument("--R_res",   type=float, default=0.04,   help="Rayon des chambres [m]")
+    parser.add_argument("--R_res",   type=float, default=0.1,   help="Rayon des chambres [m]")
     parser.add_argument("--R_pipe",  type=float, default=0.01,   help="Rayon du tube [m]")
     parser.add_argument("--L_res",   type=float, default=0.08,   help="Longueur d une chambre [m]")
     parser.add_argument("--L_pipe",  type=float, default=0.16,   help="Longueur du tube [m]")
@@ -28,7 +32,7 @@ def main():
     parser.add_argument("--lc_pipe", type=float, default=0.001,  help="Taille maille tube [m]")
     parser.add_argument("--theta",   type=float, default=1.0,    help="Schema theta (1=implicite, 0.5=CN)")
     parser.add_argument("--dt",      type=float, default=0.5,    help="Pas de temps [s]")
-    parser.add_argument("--nsteps",  type=int,   default=200,    help="Nombre de pas de temps")
+    parser.add_argument("--nsteps",  type=int,   default=2000,    help="Nombre de pas de temps")
 
     args = parser.parse_args()
     dt = args.dt
@@ -87,7 +91,13 @@ def main():
     k_nak = 22.4    # W/(m·K)
  
     T0    = 293.15  # K  — temperature initiale          (20°C)
-    T_hot = 573.15  # K  — temperature paroi tube        (300°C, test Dirichlet)
+
+    h_robin = 500.0    # W/(m²·K) — coefficient de convection externe
+    T_ext   = 473.15   # K  (200°C — température extérieure)
+    T_in = 298.15      # 25°C température ambiante
+
+    U_entree = 0.001   # m/s — vitesse moyenne à l'entrée
+    U_tube   = U_entree * (args.R_res / args.R_pipe)**2   # conservation de la masse
  
     # ------------------------------------------------------------
     # 5) Fonctions physiques
@@ -124,6 +134,24 @@ def main():
     M      = M_lil.tocsr()
     K      = K_lil.tocsr()
     M_phys = rho * cp * M       # ρ cp M
+
+    # Advection de Poiseuille dans le tube uniquement
+    def beta(x):
+        r = x[0]
+        z = x[1]
+        in_tube = (args.L_res < z < args.L_res + args.L_pipe) and (r <= args.R_pipe)
+        if in_tube:
+            return np.array([0., 2.0 * U_tube * (1. - (r / args.R_pipe)**2), 0.])
+        return np.zeros(3)
+
+    C_lil = assemble_advection(
+        elemTags=elemTags, conn=elemNodeTags,
+        jac=jac, det=det, xphys=coords,
+        w=w, N=N, gN=gN,
+        beta_fun=beta,
+        tag_to_dof=tag_to_dof,
+    )
+    C = rho * cp * C_lil.tocsr()
  
     # ------------------------------------------------------------
     # 7) Conditions aux limites — recuperation des dofs par bord
@@ -131,7 +159,6 @@ def main():
     boundary_tags  = {name: bnds_tags[i] for i, (name, _) in enumerate(bnds)}
  
     entree_dofs    = border_dofs_from_tags(boundary_tags["Entree"],    tag_to_dof)
-    sortie_dofs    = border_dofs_from_tags(boundary_tags["Sortie"],    tag_to_dof)
     wall_pipe_dofs = border_dofs_from_tags(boundary_tags["Wall_pipe"], tag_to_dof)
     # Axis, Wall_res_left/right, Contraction_left/right :
     # → Neumann homogene naturel, aucun assemblage necessaire
@@ -144,7 +171,6 @@ def main():
     # ------------------------------------------------------------
     # ETAPE ACTUELLE — diffusion pure, Dirichlet partout
     #
-    #   Wall_pipe → T = T_hot  (paroi du tube chaude, 300°C)
     #   Entree    → T = T0     (chambre gauche froide, 20°C)
     #   Sortie    → T = T0     (chambre droite froide, fixe pour test)
     #
@@ -154,17 +180,6 @@ def main():
     #   (solution analytique de la diffusion axisymetrique pure).
     #
     # TODO PROCHAINES ETAPES :
-    #   1. Robin sur Wall_pipe a la place de Dirichlet :
-    #      Rb, Fb = assemble_robin_wall(wall_pipe_dofs, dof_coords,
-    #                                   h_robin, T_ext, R=args.R_pipe)
-    #      A = K + Rb  et  F = F0 + Fb
-    #      (assemble_robin_wall est deja axisymetrique avec facteur 2πR)
-    #
-    #   2. Neumann entrant sur Entree a la place de Dirichlet :
-    #      F_in = assemble_rhs_neumann_outlet(entree_dofs, dof_coords,
-    #                                          lambda x: -q_in, R=args.R_res)
-    #      F = F0 + F_in + Fb
-    #      Plus de dir_dofs sur Entree.
     #
     #   3. Advection de Poiseuille dans le tube :
     #      def beta(x):
@@ -177,15 +192,18 @@ def main():
     #      C = assemble_advection(..., beta_fun=beta, ...)
     #      A = K + Rb + C
     # ------------------------------------------------------------
-    dir_dofs = np.concatenate([entree_dofs, sortie_dofs, wall_pipe_dofs])
-    dir_vals = np.concatenate([
-        np.full(len(entree_dofs),    T0,    dtype=float),
-        np.full(len(sortie_dofs),    T0,    dtype=float),
-        np.full(len(wall_pipe_dofs), T_hot, dtype=float),
-    ])
+    # Dirichlet sur toute la face d'entrée (r=0 à R_res)
+    dir_dofs = entree_dofs
+    dir_vals = np.full(len(entree_dofs), T_in, dtype=float)
+
+    # Robin sur Wall_pipe
+    Rb, Fb  = assemble_robin_wall(wall_pipe_dofs, dof_coords, h_robin, T_ext)
+
+    # Sortie : Neumann nul → rien à assembler
+
+    A = K + Rb + C    # diffusion + Robin + advection
+    F = F0 + Fb
     U[dir_dofs] = dir_vals
- 
-    F = F0.copy()   # pas de Neumann ni Robin pour l'instant
  
     # ------------------------------------------------------------
     # 9) Boucle en temps (schema theta)
@@ -194,7 +212,7 @@ def main():
  
     for step in range(args.nsteps):
         U = theta_step(
-            M=M_phys, K=K,
+            M=M_phys, K=A,
             F_n=F, F_np1=F,
             U_n=U, dt=args.dt, theta=args.theta,
             dirichlet_dofs=dir_dofs,
@@ -219,33 +237,43 @@ def main():
     # 11) Animation du champ de temperature
     # ------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(12, 4))
- 
-    _, Uf0 = frames_U[0]
-    contour0 = plot_fe_solution_2d(
-        elemNodeTags=elemNodeTags_saved, nodeCoords=nodeCoords_saved,
-        nodeTags=nodeTags_saved, U=Uf0, tag_to_dof=tag_to_dof,
-        show_mesh=False, ax=ax, vmin_val=T0, vmax_val=T_hot,
+
+    t0, Uf0 = frames_U[0]
+    contour = plot_full_reservoir(
+        ax=ax,
+        nodeCoords=nodeCoords_saved,
+        elemNodeTags=elemNodeTags_saved,
+        nodeTags=nodeTags_saved,
+        U=Uf0,
+        tag_to_dof=tag_to_dof,
+        cmap='plasma',
+        vmin=T_in, vmax=T_ext,
+        swap_axes=True
     )
-    cbar = fig.colorbar(contour0, ax=ax, label="Température [K]")
-    cbar.set_ticks([T0, (T0 + T_hot) / 2, T_hot])
-    cbar.set_ticklabels([
-        f"{T0             - 273.15:.0f}°C",
-        f"{(T0 + T_hot)/2 - 273.15:.0f}°C",
-        f"{T_hot          - 273.15:.0f}°C",
-    ])
- 
+
+    fig.colorbar(contour, ax=ax, label="Température [K]")
+
     def update(frame):
         t, Uf = frame
         ax.clear()
-        plot_fe_solution_2d(
-            elemNodeTags=elemNodeTags_saved, nodeCoords=nodeCoords_saved,
-            nodeTags=nodeTags_saved, U=Uf, tag_to_dof=tag_to_dof,
-            show_mesh=False, ax=ax, vmin_val=T0, vmax_val=T_hot,
+
+        # recrée le plot
+        contour = plot_full_reservoir(
+            ax=ax,
+            nodeCoords=nodeCoords_saved,
+            elemNodeTags=elemNodeTags_saved,
+            nodeTags=nodeTags_saved,
+            U=Uf,
+            tag_to_dof=tag_to_dof,
+            cmap='plasma',
+            vmin=T_in, vmax=T_ext,
+            swap_axes=True
         )
-        ax.set_title(f"Diffusion pure axisymetrique — t = {t:.1f} s")
+
+        ax.set_title(f"t = {t:.1f} s")
         ax.set_xlabel("r [m]")
         ax.set_ylabel("z [m]")
-        ax.set_aspect("equal")
+        ax.set_aspect("auto")
  
     ani = FuncAnimation(fig, update, frames=frames_U, interval=80)
     ani.save("figures/simulation_diffusion_pure_axi.gif", writer=PillowWriter(fps=10))

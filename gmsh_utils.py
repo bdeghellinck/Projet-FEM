@@ -454,4 +454,148 @@ def build_axi_reservoir_mesh(
     bnds, bnds_tags = _extract_boundaries(boundary_names)
  
     return elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
+
+
+
+def mirror_axi_solution(nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof):
+    """
+    Construit le domaine complet r in [-R_res, R_res] par symétrie miroir
+    du maillage axisymétrique r >= 0, pour la visualisation uniquement.
+
+    Le maillage de calcul (r >= 0) est dupliqué en miroir (r <= 0).
+    Les noeuds sur l'axe r=0 sont partagés. Le champ U est copié
+    symétriquement (T(-r,z) = T(r,z) par axisymétrie).
+
+    Parameters
+    ----------
+    nodeCoords   : ndarray flattened, coordonnées gmsh (x,y,z) de tous les noeuds
+    elemNodeTags : ndarray flattened, connectivité des éléments
+    nodeTags     : ndarray, tags gmsh des noeuds
+    U            : ndarray (num_dofs,), solution FEM
+    tag_to_dof   : ndarray, mapping tag gmsh -> indice compact
+
+    Returns
+    -------
+    x_full  : ndarray (N_full,)  coordonnées r du domaine complet
+    y_full  : ndarray (N_full,)  coordonnées z du domaine complet
+    tri_full: ndarray (M_full,3) triangles du domaine complet (indices dans x_full)
+    U_full  : ndarray (N_full,)  valeurs de T sur le domaine complet
+    """
+    import numpy as np
+
+    all_coords = np.asarray(nodeCoords, dtype=float).reshape(-1, 3)
+    nodeTags   = np.asarray(nodeTags,   dtype=int)
+
+    # --- reconstruction coordonnées et valeurs sur r >= 0
+    num_dofs = int(np.max(tag_to_dof[tag_to_dof >= 0]) + 1)
+    r_axi = np.zeros(num_dofs)
+    z_axi = np.zeros(num_dofs)
+
+    for i, tag in enumerate(nodeTags):
+        dof = tag_to_dof[int(tag)]
+        if dof >= 0:
+            r_axi[dof] = all_coords[i, 0]
+            z_axi[dof] = all_coords[i, 1]
+
+    # --- triangles du côté r >= 0
+    ne   = len(elemNodeTags) // 3
+    conn = np.asarray(elemNodeTags, dtype=int).reshape(ne, -1)
+    # prendre les 3 premiers noeuds (coins) et convertir en indices compacts
+    tri_axi = tag_to_dof[conn[:, :3]]
+
+    # --- noeuds sur l'axe r=0
+    on_axis = (np.abs(r_axi) < 1e-12)
+
+    # --- côté miroir r <= 0
+    # les noeuds hors axe sont dupliqués, les noeuds sur l'axe sont partagés
+    # mapping : indice axi -> indice dans le domaine complet
+    n_axi    = num_dofs
+    # noeuds hors axe reçoivent un nouvel indice
+    off_axis = ~on_axis
+    n_off    = int(np.sum(off_axis))
+
+    # indices dans x_full :
+    #   0 .. n_axi-1          : côté r >= 0 (original)
+    #   n_axi .. n_axi+n_off-1 : côté r <= 0 (miroir, hors axe seulement)
+
+    mirror_idx = np.full(n_axi, -1, dtype=int)
+    counter = n_axi
+    for i in range(n_axi):
+        if off_axis[i]:
+            mirror_idx[i] = counter
+            counter += 1
+        else:
+            mirror_idx[i] = i   # noeud sur l'axe : même indice
+
+    n_full = counter
+
+    # --- construction des tableaux complets
+    x_full = np.zeros(n_full)
+    y_full = np.zeros(n_full)
+    U_full = np.zeros(n_full)
+
+    # côté r >= 0
+    x_full[:n_axi] = r_axi
+    y_full[:n_axi] = z_axi
+    U_full[:n_axi] = U
+
+    # côté r <= 0 (miroir, hors axe)
+    for i in range(n_axi):
+        if off_axis[i]:
+            j = mirror_idx[i]
+            x_full[j] = -r_axi[i]   # symétrie r -> -r
+            y_full[j] =  z_axi[i]
+            U_full[j] =  U[i]        # T(-r,z) = T(r,z)
+
+    # --- triangles côté r >= 0 (déjà en indices compacts)
+    tri_right = tri_axi.copy()
+
+    # --- triangles côté r <= 0 (miroir)
+    # chaque triangle (a,b,c) devient (mirror(a), mirror(b), mirror(c))
+    # et on inverse l'orientation pour que les normales pointent vers l'extérieur
+    tri_left = np.zeros_like(tri_right)
+    for k in range(3):
+        tri_left[:, k] = mirror_idx[tri_right[:, k]]
+    tri_left = tri_left[:, ::-1]   # inversion orientation
+
+    tri_full = np.vstack([tri_right, tri_left])
+
+    return x_full, y_full, tri_full, U_full
+
+
+def plot_full_reservoir(ax, nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof,
+                        vmin=None, vmax=None, cmap='hot_r', swap_axes=False):
+    """
+    Affiche la coupe complète du réservoir (r in [-R_res, R_res])
+    par miroir du maillage axisymétrique.
+
+    Parameters
+    ----------
+    ax          : matplotlib Axes
+    nodeCoords, elemNodeTags, nodeTags, tag_to_dof : sorties de build_axi_reservoir_mesh
+    U           : ndarray (num_dofs,), solution FEM
+    vmin, vmax  : bornes colorbar (None = auto)
+    cmap        : colormap matplotlib
+
+    Returns
+    -------
+    contour : l'objet tricontourf (pour fig.colorbar)
+    """
+    x_full, y_full, tri_full, U_full = mirror_axi_solution(
+        nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof
+    )
+ 
+    vmin_eff = vmin if vmin is not None else float(U_full.min())
+    vmax_eff = vmax if vmax is not None else float(U_full.max())
+ 
+    xa, ya = (y_full, x_full) if swap_axes else (x_full, y_full)
+    xlabel  = "z [m]"         if swap_axes else "r [m]"
+    ylabel  = "r [m]"         if swap_axes else "z [m]"
+ 
+    contour = ax.tricontourf(xa, ya, tri_full, U_full,
+                             levels=100, cmap=cmap,
+                             vmin=vmin_eff, vmax=vmax_eff)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    return contour
  

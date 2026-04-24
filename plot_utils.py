@@ -109,7 +109,7 @@ def plot_mesh_2d(elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, b
     plt.show()
 
 
-def plot_fe_solution_2d(elemNodeTags, nodeCoords, nodeTags, U, tag_to_dof, show_mesh=False, ax=None, label=None, vmin_val = 0, vmax_val = 500):
+def plot_fe_solution_2d(elemNodeTags, nodeCoords, nodeTags, U, tag_to_dof, show_mesh=False, ax=None, label=None, vmin_val = None, vmax_val = None, swap_axes=False):
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -141,11 +141,22 @@ def plot_fe_solution_2d(elemNodeTags, nodeCoords, nodeTags, U, tag_to_dof, show_
     # 4. Plotting
     U = np.array(U).flatten()
 
+    vmin = vmin_val if vmin_val is not None else float(U.min())
+    vmax = vmax_val if vmax_val is not None else float(U.max())
+
+    xa, ya = (y, x) if swap_axes else (x, y)
     # adaptée avec v_min et v_max pour que ça soit cohérent avec nos valeurs
-    contour = ax.tricontourf(x, y, triangles, U, levels=100, cmap='hot_r', vmin=vmin_val, vmax=vmax_val)
-    
+    xlabel = "z [m]" if swap_axes else "r [m]"
+    ylabel = "r [m]" if swap_axes else "z [m]"
+
+    contour = ax.tricontourf(xa, ya, triangles, U, levels=100, cmap='hot_r',
+                             vmin=vmin, vmax=vmax)
+
     if show_mesh:
-        ax.triplot(x, y, triangles, color='white', linewidth=0.2, alpha=0.3)
+        ax.triplot(xa, ya, triangles, color='white', linewidth=0.2, alpha=0.3)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
 
     return contour
 
