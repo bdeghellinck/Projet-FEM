@@ -455,8 +455,6 @@ def build_axi_reservoir_mesh(
  
     return elemType, nodeTags, nodeCoords, elemTags, elemNodeTags, bnds, bnds_tags
 
-
-
 def mirror_axi_solution(nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof):
     """
     Construit le domaine complet r in [-R_res, R_res] par symétrie miroir
@@ -599,3 +597,186 @@ def plot_full_reservoir(ax, nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof,
     ax.set_ylabel(ylabel)
     return contour
  
+
+def revolve_axi_solution_3d(nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof,
+                             n_sectors=60):
+    """
+    Build a 3D surface mesh by revolving the 2D axisymmetric solution
+    around the z-axis, for 3D visualisation only.
+
+    The 2D meridional mesh (r >= 0) is swept through n_sectors angular
+    slices covering [0, 2π].  Each 2D triangle (a, b, c) becomes a
+    triangular prism whose two triangular faces contribute to the surface.
+
+    Parameters
+    ----------
+    nodeCoords   : ndarray flattened  – gmsh node coordinates
+    elemNodeTags : ndarray flattened  – element connectivity
+    nodeTags     : ndarray            – gmsh node tags
+    U            : ndarray (num_dofs,) – FEM solution
+    tag_to_dof   : ndarray            – gmsh tag -> compact DOF index
+    n_sectors    : int                – number of angular divisions (default 60)
+
+    Returns
+    -------
+    X, Y, Z  : ndarray (N_3d,)   – 3D Cartesian coordinates of all nodes
+    tri3d    : ndarray (M_3d, 3) – triangle connectivity (indices into X/Y/Z)
+    U3d      : ndarray (N_3d,)   – solution value at each 3D node
+    """
+    import numpy as np
+
+    all_coords = np.asarray(nodeCoords, dtype=float).reshape(-1, 3)
+    nodeTags   = np.asarray(nodeTags,   dtype=int)
+
+    # ------------------------------------------------------------------ #
+    # 1.  Recover (r, z) and U on the meridional half-plane              #
+    # ------------------------------------------------------------------ #
+    num_dofs = int(np.max(tag_to_dof[tag_to_dof >= 0]) + 1)
+    r_axi = np.zeros(num_dofs)
+    z_axi = np.zeros(num_dofs)
+
+    for i, tag in enumerate(nodeTags):
+        dof = tag_to_dof[int(tag)]
+        if dof >= 0:
+            r_axi[dof] = all_coords[i, 0]
+            z_axi[dof] = all_coords[i, 1]
+
+    # 2D triangles in compact DOF indices
+    ne   = len(elemNodeTags) // 3
+    conn = np.asarray(elemNodeTags, dtype=int).reshape(ne, -1)
+    tri2d = tag_to_dof[conn[:, :3]]          # shape (ne, 3)
+
+    # ------------------------------------------------------------------ #
+    # 2.  Revolve: one layer of 3D nodes per angular sector              #
+    # ------------------------------------------------------------------ #
+    angles = np.linspace(0.0, 2.0 * np.pi, n_sectors, endpoint=False)
+
+    # 3D node array: sector k, dof i  →  flat index k*num_dofs + i
+    n3d = n_sectors * num_dofs
+    X   = np.zeros(n3d)
+    Y   = np.zeros(n3d)
+    Z   = np.zeros(n3d)
+    U3d = np.zeros(n3d)
+
+    for k, theta in enumerate(angles):
+        base = k * num_dofs
+        X[base:base + num_dofs] = r_axi * np.cos(theta)
+        Y[base:base + num_dofs] = r_axi * np.sin(theta)
+        Z[base:base + num_dofs] = z_axi
+        U3d[base:base + num_dofs] = U
+
+    # ------------------------------------------------------------------ #
+    # 3.  Build triangular faces from prisms between adjacent sectors    #
+    #                                                                     #
+    #  For each 2D triangle (a, b, c) and two consecutive sectors k, k+1 #
+    #  we get a triangular prism with 6 nodes:                           #
+    #    a0=k*n+a,  b0=k*n+b,  c0=k*n+c                                 #
+    #    a1=k1*n+a, b1=k1*n+b, c1=k1*n+c                               #
+    #  Split each quad face into 2 triangles → 2 tris per quad face,    #
+    #  or simply output the two end-cap triangles (gives a closed solid). #
+    #                                                                     #
+    #  Here we keep ALL faces (2 end-caps + 3 side quads split in 2)    #
+    #  so the surface is water-tight and shows interior colour variation. #
+    # ------------------------------------------------------------------ #
+    faces = []
+
+    n = num_dofs   # shorthand
+
+    for k in range(n_sectors):
+        k1  = (k + 1) % n_sectors
+        off = k  * n
+        off1= k1 * n
+
+        a0, b0, c0 = tri2d[:, 0] + off,  tri2d[:, 1] + off,  tri2d[:, 2] + off
+        a1, b1, c1 = tri2d[:, 0] + off1, tri2d[:, 1] + off1, tri2d[:, 2] + off1
+
+        # side quad a0-b0 / b0-b1 / b1-a1  → 2 triangles
+        faces.append(np.stack([a0, b0, b1], axis=1))
+        faces.append(np.stack([a0, b1, a1], axis=1))
+
+        # side quad b0-c0 / c0-c1 / c1-b1
+        faces.append(np.stack([b0, c0, c1], axis=1))
+        faces.append(np.stack([b0, c1, b1], axis=1))
+
+        # side quad c0-a0 / a0-a1 / a1-c1
+        faces.append(np.stack([c0, a0, a1], axis=1))
+        faces.append(np.stack([c0, a1, c1], axis=1))
+
+    tri3d = np.vstack(faces)   # shape (6*n_sectors*ne, 3)
+
+    return X, Y, Z, tri3d, U3d
+
+
+def plot_full_reservoir_3d(ax, nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof,
+                       n_sectors=60, cmap='plasma', vmin=None, vmax=None,
+                       alpha=0.9):
+    """
+    Plot the 3D revolution surface of the axisymmetric FEM solution.
+
+    Parameters
+    ----------
+    ax          : Axes3D  (created with projection='3d')
+    nodeCoords, elemNodeTags, nodeTags, tag_to_dof : from build_*_mesh
+    U           : ndarray (num_dofs,) – FEM solution
+    n_sectors   : angular resolution (default 60)
+    cmap        : matplotlib colormap
+    vmin, vmax  : colorbar bounds (None = auto)
+    alpha       : surface transparency
+
+    Returns
+    -------
+    surf : the Poly3DCollection object (for fig.colorbar)
+
+    Example usage
+    -------------
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    fig = plt.figure(figsize=(10, 7))
+    ax  = fig.add_subplot(111, projection='3d')
+    surf = plot_3d_revolution(ax, nodeCoords, elemNodeTags, nodeTags,
+                              U, tag_to_dof, n_sectors=60, cmap='plasma',
+                              vmin=T_in, vmax=T_ext)
+    fig.colorbar(surf, ax=ax, shrink=0.5, label='T [K]')
+    plt.show()
+    """
+    import numpy as np
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    X, Y, Z, tri3d, U3d = revolve_axi_solution_3d(
+        nodeCoords, elemNodeTags, nodeTags, U, tag_to_dof, n_sectors=n_sectors
+    )
+
+    vmin_eff = vmin if vmin is not None else float(U3d.min())
+    vmax_eff = vmax if vmax is not None else float(U3d.max())
+
+    norm      = mcolors.Normalize(vmin=vmin_eff, vmax=vmax_eff)
+    colormap  = cm.get_cmap(cmap)
+
+    # Average U over each triangle face for face colour
+    U_face = U3d[tri3d].mean(axis=1)
+    face_colors = colormap(norm(U_face))
+
+    verts = np.stack([X[tri3d], Y[tri3d], Z[tri3d]], axis=-1)  # (M, 3, 3)
+
+    poly = Poly3DCollection(verts, facecolors=face_colors,
+                            edgecolors='none', alpha=alpha)
+    ax.add_collection3d(poly)
+
+    # Axis limits
+    R_max = np.max(np.sqrt(X**2 + Y**2))
+    ax.set_xlim(-R_max, R_max)
+    ax.set_ylim(-R_max, R_max)
+    ax.set_zlim(Z.min(), Z.max())
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_zlabel("z [m]")
+
+    # Return a ScalarMappable for colorbar compatibility
+    sm = cm.ScalarMappable(cmap=colormap, norm=norm)
+    sm.set_array([])
+    return sm

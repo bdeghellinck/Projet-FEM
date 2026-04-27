@@ -2,6 +2,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from tqdm import tqdm
 
 from gmsh_utils import (
     gmsh_finalize,
@@ -10,6 +11,7 @@ from gmsh_utils import (
     get_jacobians,
     border_dofs_from_tags,
     plot_full_reservoir,
+    plot_full_reservoir_3d
 )
 from stiffness import assemble_stiffness_and_rhs
 from mass import assemble_mass
@@ -277,9 +279,9 @@ def main():
     elemNodeTags_saved = np.array(elemNodeTags, dtype=np.int64).copy()
  
     gmsh_finalize()
- 
+
     # ------------------------------------------------------------
-    # 11) Animation du champ de temperature
+    # 11) 2D animation 
     # ------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(12, 4))
 
@@ -321,10 +323,35 @@ def main():
         ax.set_aspect("auto")
  
     ani = FuncAnimation(fig, update, frames=frames_U, interval=80)
-    ani.save("figures/simulation_diffusion_pure_axi.gif", writer=PillowWriter(fps=10))
-    print("GIF sauvegarde : figures/simulation_diffusion_pure_axi.gif")
+    ani.save("figures/simulation_2d.gif", writer=PillowWriter(fps=10))
+    print("GIF sauvegarde : figures/simulation_2d.gif")
     plt.show()
- 
+
+    # ------------------------------------------------------------
+    # 12) Static 3D plot of the final frame
+    # ------------------------------------------------------------
+    from mpl_toolkits.mplot3d import Axes3D  # registers '3d' projection, do not remove
+
+    fig3d = plt.figure(figsize=(10, 7))
+    ax3d  = fig3d.add_subplot(111, projection='3d')
+
+    _, U_final = frames_U[-1]
+    sm = plot_full_reservoir_3d(
+        ax3d,
+        nodeCoords=nodeCoords_saved,
+        elemNodeTags=elemNodeTags_saved,
+        nodeTags=nodeTags_saved,
+        U=U_final,
+        tag_to_dof=tag_to_dof,
+        cmap='plasma',
+        vmin=T0, vmax=T_ext,
+    )
+    fig3d.colorbar(sm, ax=ax3d, shrink=0.5, label="Température [K]")
+    ax3d.set_title("Champ T — régime permanent (révolution 3D)")
+    plt.tight_layout()
+    plt.savefig("figures/solution_3d_final.png", dpi=150)
+    plt.show()
+    
  
 if __name__ == "__main__":
     main()
