@@ -76,7 +76,7 @@ def assemble_advection(elemTags, conn, jac, det, xphys, w, N, gN, beta_fun, tag_
 
                 for b in range(nloc):
                     Ib = int(dof_indices[b])
-                    gradNb = invjacg @ gN[g, b]
+                    gradNb = invjacg.T @ gN[g, b]
 
                     C[Ia, Ib] += wg * Na * float(np.dot(beta_g, gradNb)) * detg * r
 
