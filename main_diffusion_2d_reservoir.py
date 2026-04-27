@@ -18,7 +18,7 @@ from mass import assemble_mass
 from dirichlet import theta_step
 from plot_utils import plot_mesh_2d, plot_fe_solution_2d
 from Neumann import assemble_rhs_neumann_outlet
-from Robin import assemble_robin_wall
+from Robin import assemble_robin_wall, compute_Q_wall
 from Advection import assemble_advection
 
 
@@ -89,15 +89,15 @@ def main():
     # 4) Parametres physiques du NaK
     # ------------------------------------------------------------
 
-    T0 = 350 + 273.15
+    T0 = 300 + 273.15
     T_ext = 500 + 273.15
 
     rho   = 860.5   # kg/m³
     cp    = 976.0   # J/(kg·K)
     k_nak = 22.4    # W/(m·K)
 
-    U_entree = 0.001   # m/s — vitesse moyenne à l'entrée
-    U_tube   = U_entree * (args.R_res / args.R_pipe)**2   # conservation de la masse
+    U_tube   = 0.1 # m/s -> valeur standard réelle pour le NaK dans la conduite de refroidissement 
+    U_entree = U_tube * (args.R_pipe / args.R_res)**2  #conservation de la masse 
 
     def nak_properties(T_K):
         """ valeurs et equations tirées de : https://mooseframework.inl.gov/source/fluidproperties/NaKFluidProperties.html """
@@ -112,7 +112,7 @@ def main():
         rho_Na = 945.3- 0.22473 * T_c
 
         # Densité K liquide (Eq. 1.8) [kg/m³]
-        rho_K  = 8415 - 0.2172 * T_c - 2.7e-5  * T_c**2 + 4.77e-9* T_c**3
+        rho_K  = 841.5 - 0.2172 * T_c - 2.7e-5  * T_c**2 + 4.77e-9* T_c**3
 
         # Densité NaK (Eq. 1.9) — règle des volumes massiques
         rho = 1.0 / (x_K / rho_K + x_Na / rho_Na)
@@ -270,9 +270,12 @@ def main():
             print(f"  step {step:4d}  t={step*args.dt:.1f}s  "
                   f"T_min={U.min()-273.15:.1f}°C  "
                   f"T_max={U.max()-273.15:.1f}°C")
+            
+    Q_wall = compute_Q_wall(Rb, Fb, U)
+    print(f"Q_wall = {Q_wall:.2f} W")
  
     # ------------------------------------------------------------
-    # 10) Sauvegarde des arrays gmsh AVANT gmsh_finalize
+    # 10) Sauvegarde des arrays gmsh
     # ------------------------------------------------------------
     nodeTags_saved     = np.array(nodeTags,     dtype=np.int64).copy()
     nodeCoords_saved   = np.array(nodeCoords,   dtype=float).copy()
@@ -327,6 +330,7 @@ def main():
     print("GIF sauvegarde : figures/simulation_2d.gif")
     plt.show()
 
+    """"
     # ------------------------------------------------------------
     # 12) Static 3D plot of the final frame
     # ------------------------------------------------------------
@@ -351,6 +355,12 @@ def main():
     plt.tight_layout()
     plt.savefig("figures/solution_3d_final.png", dpi=150)
     plt.show()
+    """
+
+    # ------------------------------------------------------------
+    # 13) Etude paramétrique
+    # ------------------------------------------------------------
+
     
  
 if __name__ == "__main__":
