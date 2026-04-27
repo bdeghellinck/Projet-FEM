@@ -86,18 +86,77 @@ def main():
     # ------------------------------------------------------------
     # 4) Parametres physiques du NaK
     # ------------------------------------------------------------
+
+    T0 = 350 + 273.15
+    T_ext = 500 + 273.15
+
     rho   = 860.5   # kg/m³
     cp    = 976.0   # J/(kg·K)
     k_nak = 22.4    # W/(m·K)
- 
-    T0    = 293.15  # K  — temperature initiale          (20°C)
-
-    h_robin = 500.0    # W/(m²·K) — coefficient de convection externe
-    T_ext   = 473.15   # K  (200°C — température extérieure)
-    T_in = 298.15      # 25°C température ambiante
 
     U_entree = 0.001   # m/s — vitesse moyenne à l'entrée
     U_tube   = U_entree * (args.R_res / args.R_pipe)**2   # conservation de la masse
+
+    def nak_properties(T_K):
+        """ valeurs et equations tirées de : https://mooseframework.inl.gov/source/fluidproperties/NaKFluidProperties.html """
+
+        T_c = T_K - 273.15   # conversion en celsius
+
+        # Fractions massiques
+        x_Na = 0.22
+        x_K = 0.78
+
+        # Densité Na liquide (Eq. 1.5) [kg/m³]  — T_c en °C
+        rho_Na = 945.3- 0.22473 * T_c
+
+        # Densité K liquide (Eq. 1.8) [kg/m³]
+        rho_K  = 8415 - 0.2172 * T_c - 2.7e-5  * T_c**2 + 4.77e-9* T_c**3
+
+        # Densité NaK (Eq. 1.9) — règle des volumes massiques
+        rho = 1.0 / (x_K / rho_K + x_Na / rho_Na)
+
+        # ------------------------------------------------------------------
+        # Conductivité thermique (Eq. 1.53) [W/(m·K)]
+        # ------------------------------------------------------------------
+        k = 21.4 + 2.07e-2 * T_c - 2.2e-5 * T_c**2
+
+        # ------------------------------------------------------------------
+        # Capacité calorifique (Eq. 1.59) [J/(kg·K)]
+        # ------------------------------------------------------------------
+        cp = 232 - 8.82e-2 * T_c + 8.23e-5 * T_c**2
+
+        # ------------------------------------------------------------------
+        # Viscosité dynamique (Eq. 1.18-1.19) — corrélation Andrade
+        # ------------------------------------------------------------------
+        mu = 5.15e-4 * np.exp(695.0 / T_K)   # Pa·s
+
+        # ------------------------------------------------------------------
+        # Propriétés dérivées
+        # ------------------------------------------------------------------
+        nu = mu / rho       # viscosité cinématique [m²/s]
+        Pr = mu * cp / k    # nombre de Prandtl [-]
+
+        return rho, cp, k, mu, nu, Pr
+
+
+    def compute_h_robin(T_op, U_entree, R_res, R_pipe, k_NaK=None):
+
+        rho, cp, k, mu, nu, Pr = nak_properties(T_op)
+
+        D_pipe = 2.0 * R_pipe
+
+        # Vitesse dans le tube (conservation masse)
+        U_tube = U_entree * (R_res / R_pipe)**2
+
+        Re = U_tube * D_pipe / nu 
+        Pe = Re * Pr               
+
+        # Corrélation Lyon-Martinelli (métaux liquides)
+        Nu = 7.0 + 0.025 * Pe**0.8
+
+        h  = Nu * k / D_pipe
+
+        return h, Pe, Nu, Re, Pr, rho, cp, k, nu, mu
  
     # ------------------------------------------------------------
     # 5) Fonctions physiques
@@ -167,50 +226,36 @@ def main():
     # 8) Condition initiale
     # ------------------------------------------------------------
     U = np.full(num_dofs, T0, dtype=float)
- 
-    # ------------------------------------------------------------
-    # ETAPE ACTUELLE — diffusion pure, Dirichlet partout
-    #
-    #   Entree    → T = T0     (chambre gauche froide, 20°C)
-    #   Sortie    → T = T0     (chambre droite froide, fixe pour test)
-    #
-    #   Resultat attendu : le champ T diffuse de la paroi chaude
-    #   vers l'axe r=0, puis vers les chambres. Le regime permanent
-    #   doit montrer un profil radial de type ln(r) dans le tube
-    #   (solution analytique de la diffusion axisymetrique pure).
-    #
-    # TODO PROCHAINES ETAPES :
-    #
-    #   3. Advection de Poiseuille dans le tube :
-    #      def beta(x):
-    #          r, z = x[0], x[1]
-    #          in_tube = (args.L_res < z < args.L_res + args.L_pipe
-    #                     and r <= args.R_pipe)
-    #          if in_tube:
-    #              return np.array([0., U_max*(1-(r/args.R_pipe)**2), 0.])
-    #          return np.zeros(3)
-    #      C = assemble_advection(..., beta_fun=beta, ...)
-    #      A = K + Rb + C
-    # ------------------------------------------------------------
+
     # Dirichlet sur toute la face d'entrée (r=0 à R_res)
     dir_dofs = entree_dofs
-    dir_vals = np.full(len(entree_dofs), T_in, dtype=float)
-
-    # Robin sur Wall_pipe
-    Rb, Fb  = assemble_robin_wall(wall_pipe_dofs, dof_coords, h_robin, T_ext)
+    dir_vals = np.full(len(entree_dofs), T0, dtype=float)
 
     # Sortie : Neumann nul → rien à assembler
-
-    A = K + Rb + C    # diffusion + Robin + advection
-    F = F0 + Fb
     U[dir_dofs] = dir_vals
  
     # ------------------------------------------------------------
     # 9) Boucle en temps (schema theta)
     # ------------------------------------------------------------
     frames_U = []
+
+    # test cohérence des valeurs numériques 
+    T_wall = np.mean(U[wall_pipe_dofs])
+    h, Pe, Nu, Re, Pr, rho, cp, k, nu, mu = compute_h_robin(T_wall, U_entree, args.R_res, args.R_pipe)
+    print('h = ', h, 'Pe = ', Pe, 'Nu = ', Nu, 'Re = ', Re, 'Pr = ', Pr, 'rho = ', rho, 
+          'mu = ', mu, 'k = ', k, 'nu = ', nu)
  
     for step in range(args.nsteps):
+        
+        # condition de Robin, avec h évalué à chaque pas de temps 
+        T_wall = np.mean(U[wall_pipe_dofs])
+        h_robin, Pe,*_ = compute_h_robin(T_wall, U_entree, args.R_res, args.R_pipe)
+
+        Rb, Fb = assemble_robin_wall(wall_pipe_dofs, dof_coords, h_robin, T_ext)
+
+        A = K + Rb + C
+        F = F0 + Fb
+
         U = theta_step(
             M=M_phys, K=A,
             F_n=F, F_np1=F,
@@ -247,7 +292,7 @@ def main():
         U=Uf0,
         tag_to_dof=tag_to_dof,
         cmap='plasma',
-        vmin=T_in, vmax=T_ext,
+        vmin=T0, vmax=T_ext,
         swap_axes=True
     )
 
@@ -266,7 +311,7 @@ def main():
             U=Uf,
             tag_to_dof=tag_to_dof,
             cmap='plasma',
-            vmin=T_in, vmax=T_ext,
+            vmin=T0, vmax=T_ext,
             swap_axes=True
         )
 
