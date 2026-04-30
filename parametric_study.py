@@ -246,7 +246,6 @@ def run_simulation(R_pipe, verbose=False):
 
     dP = compute_dP(R_pipe, mu)
 
-    # FIX 3: do NOT finalize gmsh here; let the caller handle it
     return Q_wall, Re_last, h_last, dP
 
 
@@ -278,7 +277,7 @@ def parametric_scan(R_pipe_values, verbose=False):
 
         try:
             Q_wall, Re_sim, h, dP_sim = run_simulation(R_pipe, verbose)
-            gmsh_finalize()  # FIX 3: finalize after each simulation
+            gmsh_finalize() 
 
             A_wall = 2 * np.pi * R_pipe * L_pipe
             results.append({
@@ -305,7 +304,6 @@ def parametric_scan(R_pipe_values, verbose=False):
 # 4)  Optimisation
 # ============================================================
 
-# FIX 4: use properties at mean temperature (constant across calls for speed)
 _rho_opt, _cp_opt, _k_opt, _mu_opt, _nu_opt, _Pr_opt = \
     nak_properties(0.5 * (T0 + T_ext))
 
