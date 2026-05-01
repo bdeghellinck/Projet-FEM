@@ -85,10 +85,6 @@ def compute_Q_wall_fem(Rb, Fb, U, wall_pipe_dofs):
         Q_wall = Fb[wall] - Rb[wall,:] @ U
                = ∫_Γ h·(T_ext − T_wall) dΓ   [W]
                  (positif = chaleur vers le fluide)
-
-    NOTE : l'ancienne formule Q = Rb·U − Fb donnait la mauvaise
-    orientation et surestimait Q pour les grands R. Cette version
-    est correcte et cohérente avec la formulation faible.
     """
     Rb_csr  = Rb.tocsr() if hasattr(Rb, 'tocsr') else Rb
     q_nodal = Fb[wall_pipe_dofs] - Rb_csr[wall_pipe_dofs, :].dot(U)
@@ -274,8 +270,6 @@ def parametric_study(L_pipe_values, args, T0, T_ext, Qv, dP_max=500.0):
     """
     Étude paramétrique sur L_pipe (longueur du tube), R_pipe fixé.
 
-    Pourquoi L_pipe est le bon paramètre
-    ----------------------------------------
     Q_wall = ṁ·cp·(T_ext − T0)·(1 − exp(−NTU))   avec  NTU = h·2πR·L / (ṁ·cp)
 
       - Pour L petit  : NTU ≪ 1 → Q ≈ h·A·(T_ext−T0)  croît quasi linéairement avec L
@@ -347,50 +341,103 @@ def parametric_study(L_pipe_values, args, T0, T_ext, Qv, dP_max=500.0):
     return results
 
 
+def find_optimal_L(L, Q, dP, Q_max, results):
+    """
+    Trouve L* selon trois critères complémentaires :
+
+    1. COP = Q / ΔP  [W/Pa]
+       Rapport chaleur transférée / coût de pompage.
+       Maximiser le COP donne le meilleur compromis énergétique.
+
+    2. Genou de Pareto (courbure maximale sur la courbe Q vs ΔP)
+       Le genou est le point où la courbe Q(ΔP) tourne le plus fort,
+       i.e. où le gain en Q par unité de ΔP supplémentaire chute le plus.
+       Méthode : on normalise Q et ΔP dans [0,1] puis on calcule la
+       courbure κ = |Q''| / (1 + Q'²)^(3/2) via différences finies.
+
+    3. Seuil d'efficacité η = 90 %
+       L minimal tel que Q ≥ 0.9 · Q_max.
+       Critère d'ingénierie simple : on accepte 10 % de perte thermique.
+
+    Retourne un dict avec les indices et valeurs de L pour chaque critère.
+    """
+    COP = Q / dP   # W/Pa
+
+    # --- Critère 1 : max COP ---
+    i_cop = int(np.argmax(COP))
+
+    # --- Critère 2 : genou de Pareto (courbure max sur Q vs ΔP normalisé) ---
+    # Normalisation dans [0,1]
+    dP_n = (dP - dP.min()) / (dP.max() - dP.min() + 1e-12)
+    Q_n  = (Q  - Q.min())  / (Q.max()  - Q.min()  + 1e-12)
+    # Différences finies pour dQ_n/ddP_n et d²Q_n/ddP_n²
+    if len(L) >= 3:
+        dQdP   = np.gradient(Q_n, dP_n)
+        d2QdP2 = np.gradient(dQdP, dP_n)
+        kappa  = np.abs(d2QdP2) / (1.0 + dQdP**2)**1.5
+        # Le genou est le point de courbure max (excluant les bords)
+        i_knee = int(np.argmax(kappa[1:-1])) + 1
+    else:
+        i_knee = i_cop   # fallback si pas assez de points
+
+    # --- Critère 3 : seuil η = 90 % ---
+    eta_target = 0.90
+    i_eta = None
+    for j, q in enumerate(Q):
+        if q >= eta_target * Q_max:
+            i_eta = j
+            break
+    if i_eta is None:
+        i_eta = int(np.argmax(Q))   # fallback : max Q si seuil jamais atteint
+
+    return dict(
+        i_cop  = i_cop,  L_cop  = L[i_cop],  Q_cop  = Q[i_cop],  dP_cop  = dP[i_cop],
+        i_knee = i_knee, L_knee = L[i_knee], Q_knee = Q[i_knee], dP_knee = dP[i_knee],
+        i_eta  = i_eta,  L_eta  = L[i_eta],  Q_eta  = Q[i_eta],  dP_eta  = dP[i_eta],
+        COP    = COP,
+    )
+
+
+
 def plot_parametric_results(results, T0, T_ext, args, Qv):
     """
-    Trace les graphes de l'étude paramétrique en L_pipe et identifie L*.
-
-    Affiche :
-      - Q_wall vs L_pipe  (FEM + courbe analytique NTU)
-      - ΔP vs L_pipe      (linéaire — Hagen-Poiseuille)
-      - Front de Pareto   Q_wall / ΔP  (genou = L*)
-      - Efficacité η = Q/Q_max vs L
-      - ΔQ/ΔL (gain marginal) vs L  → s'annule au genou
-      - T_wall_mean vs L
+    Trace les graphes de l'étude paramétrique en L_pipe.
+    Identifie L* selon trois critères : COP max, genou de Pareto, η = 90 %.
     """
     if not results:
         print("Aucun résultat à tracer.")
         return
 
     R_pipe = args.R_pipe
-    L  = np.array([r["L_pipe"]      for r in results])        # m
-    Q  = np.array([r["Q_wall"]      for r in results])         # W
-    dP = np.array([r["dP"]          for r in results])         # Pa
-    h  = np.array([r["h"]           for r in results])         # W/m²K
-    Tw = np.array([r["T_wall_mean"] for r in results]) - 273.15  # °C
-    Ts = np.array([r["T_sortie"]    for r in results]) - 273.15  # °C
+    L  = np.array([r["L_pipe"]      for r in results])
+    Q  = np.array([r["Q_wall"]      for r in results])
+    dP = np.array([r["dP"]          for r in results])
+    h  = np.array([r["h"]           for r in results])
+    Ts = np.array([r["T_sortie"]    for r in results]) - 273.15
 
     rho_r, cp_r, k_r, mu_r, nu_r, Pr_r = nak_properties(0.5 * (T0 + T_ext))
-    m_dot   = rho_r * Qv
-    Q_max   = m_dot * cp_r * (T_ext - T0)  # saturation thermique [W]
+    m_dot = rho_r * Qv
+    Q_max = m_dot * cp_r * (T_ext - T0)
 
-    # h évalué à T0 (entrée) — plus représentatif pour NTU car T augmente le long du tube
     h_ref, *_ = compute_h_robin_from_Qv(T0, R_pipe, Qv)
 
-    # Courbe analytique NTU : Q_an(L) = Q_max · (1 − exp(−NTU(L)))
-    L_an   = np.linspace(0, L.max() * 1.1, 300)
-    NTU_an = h_ref * 2 * np.pi * R_pipe * L_an / (m_dot * cp_r)
-    Q_an   = Q_max * (1.0 - np.exp(-NTU_an))
-    dP_an  = compute_dP_hagen(R_pipe, mu_r, L_an, Qv)
-
-    # NTU aux points FEM
+    L_an    = np.linspace(0, L.max() * 1.1, 300)
+    NTU_an  = h_ref * 2 * np.pi * R_pipe * L_an / (m_dot * cp_r)
+    Q_an    = Q_max * (1.0 - np.exp(-NTU_an))
+    dP_an   = compute_dP_hagen(R_pipe, mu_r, L_an, Qv)
     NTU_fem = h_ref * 2 * np.pi * R_pipe * L / (m_dot * cp_r)
+    dQdL    = np.gradient(Q, L)
 
-    # Gain marginal dQ/dL (différences finies)
-    dQdL = np.gradient(Q, L)
+    # --- Trouver les trois L* ---
+    opt = find_optimal_L(L, Q, dP, Q_max, results)
+    COP = opt["COP"]
 
-    i_best = int(np.argmax(Q))
+    # (mpl_marker, symbol pour texte/légende)
+    opt_styles = [
+        ("COP max",  opt["i_cop"],  opt["L_cop"],  "gold",        "*",  "★"),
+        ("Genou",    opt["i_knee"], opt["L_knee"], "deepskyblue", "D",  "◆"),
+        ("η = 90 %", opt["i_eta"],  opt["L_eta"],  "limegreen",   "o",  "●"),
+    ]
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
     fig.suptitle(
@@ -399,42 +446,51 @@ def plot_parametric_results(results, T0, T_ext, args, Qv):
         fontsize=13, fontweight='bold'
     )
 
-    # Q_wall vs L  (FEM + analytique NTU)
+    # Q_wall vs L
     ax = axes[0, 0]
     ax.plot(L_an*100, Q_an, '--', color='gray', lw=1.5, label='NTU analytique')
-    ax.plot(L*100, Q, 'o-', color='crimson', lw=2, ms=7, label='FEM Robin')
+    ax.plot(L*100, Q, 'o-', color='crimson', lw=2, ms=5, label='FEM')
     ax.axhline(Q_max, ls=':', color='black', alpha=0.4, label=f'Q_max = {Q_max:.0f} W')
+    for label, idx, L_opt, color, mpl_marker, sym in opt_styles:
+        ax.axvline(L_opt*100, ls='--', color=color, alpha=0.8, lw=1.5)
+        ax.plot(L_opt*100, Q[idx], marker=mpl_marker, color=color,
+                ms=12, zorder=6, label=f'{sym} {label} ({L_opt*100:.0f} cm)')
     ax.set_xlabel("L_pipe [cm]"); ax.set_ylabel("Q_wall [W]")
     ax.set_title("Flux thermique pariétal")
-    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
-    # ΔP vs L  (linéaire)
+    # ΔP vs L
     ax = axes[0, 1]
     ax.plot(L_an*100, dP_an, '--', color='lightblue', lw=1.5, label='Hagen-Poiseuille')
     ax.plot(L*100, dP, 's-', color='steelblue', lw=2, ms=6, label='points FEM')
+    for label, idx, L_opt, color, mpl_marker, sym in opt_styles:
+        ax.axvline(L_opt*100, ls='--', color=color, alpha=0.8, lw=1.5, label=f'{sym} {label}')
     ax.set_xlabel("L_pipe [cm]"); ax.set_ylabel("ΔP [Pa]")
     ax.set_title("Pertes de charge  (∝ L)")
-    ax.legend(); ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
-    # Front de Pareto : Q vs ΔP  — le genou est L*
+    # Front de Pareto : Q vs ΔP
     ax = axes[0, 2]
     ax.plot(dP_an, Q_an, '--', color='gray', lw=1.5, label='NTU analytique')
-    sc = ax.scatter(dP, Q, c=L*100, cmap='viridis', s=90, zorder=5)
+    sc = ax.scatter(dP, Q, c=L*100, cmap='viridis', s=60, zorder=4)
     plt.colorbar(sc, ax=ax, label='L_pipe [cm]')
     for j in range(len(L)):
         ax.annotate(f"{L[j]*100:.0f}cm", (dP[j], Q[j]),
-                    textcoords="offset points", xytext=(4, 3), fontsize=7)
+                    textcoords="offset points", xytext=(4, 3), fontsize=6)
+    for label, idx, L_opt, color, mpl_marker, sym in opt_styles:
+        ax.plot(dP[idx], Q[idx], marker=mpl_marker, color=color, ms=12, zorder=6,
+                label=f'{sym} {label}')
     ax.set_xlabel("ΔP [Pa]  ← minimiser"); ax.set_ylabel("Q_wall [W]  ↑ maximiser")
     ax.set_title("Front de Pareto  (genou = L*)")
-    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
-    # Efficacité η = Q / Q_max vs L
+    # COP = Q / ΔP vs L
     ax = axes[1, 0]
-    ax.plot(L_an*100, (1-np.exp(-NTU_an))*100, '--', color='gray', lw=1.5, label='analytique')
-    ax.plot(L*100, Q/Q_max*100, 'o-', color='teal', lw=2, ms=7, label='FEM')
-    ax.axhline(90, ls=':', color='orange', alpha=0.7, label='η = 90 %')
-    ax.set_xlabel("L_pipe [cm]"); ax.set_ylabel("η = Q / Q_max  [%]")
-    ax.set_title("Efficacité thermique")
+    ax.plot(L*100, COP, 'o-', color='mediumorchid', lw=2, ms=6)
+    ax.plot(opt["L_cop"]*100, COP[opt["i_cop"]], marker='*', color='gold', ms=14, zorder=6,
+            label=f'★ max COP = {COP[opt["i_cop"]]:.1f} W/Pa  @ {opt["L_cop"]*100:.0f} cm')
+    ax.set_xlabel("L_pipe [cm]"); ax.set_ylabel("COP = Q / ΔP  [W/Pa]")
+    ax.set_title("Coefficient de performance  (↑ = mieux)")
     ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
     # Gain marginal dQ/dL
@@ -443,13 +499,14 @@ def plot_parametric_results(results, T0, T_ext, args, Qv):
     ax.plot(L_an*100, dQdL_an, '--', color='gray', lw=1.5, label='analytique')
     ax.plot(L*100, dQdL, '^-', color='darkorange', lw=2, ms=6, label='FEM (diff. finies)')
     ax.axhline(0, color='black', lw=0.5)
+    for label, idx, L_opt, color, mpl_marker, sym in opt_styles:
+        ax.axvline(L_opt*100, ls='--', color=color, alpha=0.8, lw=1.5)
     ax.set_xlabel("L_pipe [cm]"); ax.set_ylabel("dQ/dL  [W/m]")
     ax.set_title("Gain marginal  (↓ exponentiellement)")
     ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
-    # T_sortie vs L  (température de sortie du fluide)
+    # T_sortie vs L
     ax = axes[1, 2]
-    # Analytique : T_sortie = T_ext - (T_ext-T0)*exp(-NTU)
     T_sortie_an = (T_ext - 273.15) - (T_ext - T0) * np.exp(-NTU_an)
     ax.plot(L_an*100, T_sortie_an, '--', color='gray', lw=1.5, label='NTU analytique')
     ax.plot(L*100, Ts, 'x-', color='slategray', lw=2, ms=8, label='FEM (T_sortie)')
@@ -457,36 +514,46 @@ def plot_parametric_results(results, T0, T_ext, args, Qv):
                label=f'T_ext = {T_ext-273.15:.0f}°C')
     ax.axhline(T0 - 273.15, ls=':', color='blue', alpha=0.5,
                label=f'T_0 = {T0-273.15:.0f}°C')
+    for label, idx, L_opt, color, mpl_marker, sym in opt_styles:
+        ax.axvline(L_opt*100, ls='--', color=color, alpha=0.8, lw=1.5)
     ax.set_xlabel("L_pipe [cm]"); ax.set_ylabel("T_sortie [°C]")
     ax.set_title("Température de sortie du fluide")
-    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig("figures/parametric_study.png", dpi=150)
     print("Figure sauvegardée : figures/parametric_study.png")
     plt.show()
 
-    # Tableau récapitulatif
-    print("\n" + "=" * 72)
+    # --- Tableau récapitulatif ---
+    print("\n" + "=" * 78)
     print(f"  {'L[cm]':>7} {'Q[W]':>9} {'ΔP[Pa]':>9} "
-          f"{'η[%]':>7} {'NTU':>7} {'h[W/m²K]':>10}")
-    print("  " + "-" * 58)
+          f"{'η[%]':>7} {'NTU':>7} {'COP[W/Pa]':>11}")
+    print("  " + "-" * 62)
     for j in range(len(L)):
-        marker = "  ← L*" if j == i_best else ""
+        markers = []
+        if j == opt["i_cop"]:  markers.append("★ COP")
+        if j == opt["i_knee"]: markers.append("◆ genou")
+        if j == opt["i_eta"]:  markers.append("● η90%")
+        tag = "  " + " | ".join(markers) if markers else ""
         eta = Q[j] / Q_max * 100
         print(f"  {L[j]*100:>7.1f}  {Q[j]:>9.2f}  {dP[j]:>9.3f}  "
-              f"{eta:>7.1f}  {NTU_fem[j]:>7.3f}  {h[j]:>9.0f}{marker}")
-    print("=" * 72)
+              f"{eta:>7.1f}  {NTU_fem[j]:>7.3f}  {COP[j]:>11.1f}{tag}")
+    print("=" * 78)
 
-    best = results[i_best]
-    print(f"\n  L optimal : {best['L_pipe']*100:.1f} cm")
-    print(f"  Q_wall    = {best['Q_wall']:.2f} W  (η = {best['Q_wall']/Q_max*100:.1f} %)")
-    print(f"  ΔP        = {best['dP']:.3f} Pa")
-    print(f"  h         = {best['h']:.0f} W/m²K")
+    print(f"\n  Q_max (saturation thermique) = {Q_max:.0f} W")
+    print(f"\n  {'Critère':<18} {'L* [cm]':>9} {'Q [W]':>9} {'ΔP [Pa]':>9} {'η [%]':>7} {'COP':>8}")
+    print("  " + "-" * 62)
+    for label, idx, L_opt, color, mpl_marker, sym in opt_styles:
+        eta = Q[idx] / Q_max * 100
+        print(f"  {sym} {label:<16} {L_opt*100:>9.1f} {Q[idx]:>9.2f} "
+              f"{dP[idx]:>9.3f} {eta:>7.1f} {COP[idx]:>8.1f}")
     print(f"\n  Lecture physique :")
-    print(f"    NTU = h·2πRL / (ṁ·cp) → Q sature exponentiellement avec L")
-    print(f"    Q_max = ṁ·cp·(T_ext−T0) = {Q_max:.0f} W  (saturation thermique)")
-    print(f"    Au-delà de L* ≈ {best['L_pipe']*100:.0f} cm, le gain marginal dQ/dL devient négligeable")
+    print(f"    ★ COP max  → meilleur rapport Q/ΔP  (critère énergétique)")
+    print(f"    ◆ Genou    → courbure max du front de Pareto  (compromis géométrique)")
+    print(f"    ● η = 90 % → L minimal pour 90 % de saturation  (critère d'ingénierie)")
+
+
 
 
 # ============================================================
@@ -845,4 +912,4 @@ if __name__ == "__main__":
 
 
 # pour run étude paramétrique uniquement : 
-# python main_diffusion_2d_reservoir.py --study --R_pipe 0.02 --n_L 15 --L_min 0.05 --L_max 0.80
+# python main_diffusion_2d_reservoir.py --study --R_pipe 0.02 --n_L 10 --L_min 0.05 --L_max 0.80
