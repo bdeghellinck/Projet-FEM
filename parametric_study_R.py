@@ -173,7 +173,7 @@ def run_simulation(R_pipe, verbose=False):
     K      = K_lil.tocsr()
     M_phys = rho * cp * M
 
-    # --- Advection velocity (Poiseuille inside pipe) ---
+    # --- Advection velocity (Poiseuille inside pipe) ---    !!! changer pour mettre dans tout le domaine copie le beta de main
     def beta(x):
         r, z = x[0], x[1]
         if (L_res < z < L_res + L_pipe) and (r <= R_pipe):

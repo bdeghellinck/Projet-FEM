@@ -743,13 +743,28 @@ def main():
     K      = K_lil.tocsr()
     M_phys = rho * cp * M       # ρ cp M
 
-    # Advection de Poiseuille dans le tube uniquement
+    # Advection de Poiseuille dans le tube et reservoir
     def beta(x):
         r = x[0]
         z = x[1]
-        in_tube = (args.L_res < z < args.L_res + args.L_pipe) and (r <= args.R_pipe)
-        if in_tube:
-            return np.array([0., 2.0 * U_tube * (1. - (r / args.R_pipe)**2), 0.])
+
+        z1 = args.L_res
+        z2 = args.L_res + args.L_pipe
+        z3 = 2.0 * args.L_res + args.L_pipe
+
+        Qv = U_tube * np.pi * args.R_pipe**2
+        U_res = Qv / (np.pi * args.R_res**2)
+
+        if 0.0 <= z <= z1 and r <= args.R_res:
+            return np.array([0.0, U_res, 0.0])
+
+        if z1 < z < z2 and r <= args.R_pipe:
+            uz = 2.0 * U_tube * (1.0 - (r / args.R_pipe)**2)
+            return np.array([0.0, uz, 0.0])
+
+        if z2 <= z <= z3 and r <= args.R_res:
+            return np.array([0.0, U_res, 0.0])
+
         return np.zeros(3)
 
     C_lil = assemble_advection(
